@@ -371,6 +371,21 @@ class BaseConfiguration:
         return self.conf.get("defaults", [])
 
     @property
+    def collection_roots(self):
+        """Returns mapping of collection names to symlink root directories."""
+        raw_roots = self.module.configuration(self.name).get("collection_roots", {})
+        if not isinstance(raw_roots, dict):
+            return {}
+
+        normalized = {}
+        for name, path in raw_roots.items():
+            key = str(name).strip().lower()
+            if not key:
+                continue
+            normalized[key] = spack.util.path.canonicalize_path(path)
+        return normalized
+
+    @property
     def env(self):
         """List of environment modifications that should be done in the
         module.
@@ -567,6 +582,15 @@ class BaseContext(tengine.Context):
         if not hasattr(self.spec.package, "tags"):
             return []
         return self.spec.package.tags
+
+    @tengine.context_property
+    def collections(self):
+        pkg = self.spec.package
+        if hasattr(pkg, "collections"):
+            return pkg.collections
+        if hasattr(pkg, "tags"):
+            return pkg.tags
+        return []
 
     @tengine.context_property
     def timestamp(self):
@@ -909,6 +933,9 @@ class BaseModuleFileWriter:
         if os.path.exists(self.layout.filename):
             fp.set_permissions_by_spec(self.layout.filename, self.spec)
 
+        # Create optional category/collection symlinks for this module.
+        self.update_collection_symlinks()
+
         # Symlink defaults if needed
         self.update_module_defaults()
 
@@ -924,6 +951,57 @@ class BaseModuleFileWriter:
             default_tmp = os.path.join(os.path.dirname(self.layout.filename), ".tmp_spack_default")
             os.symlink(self.layout.filename, default_tmp)
             os.rename(default_tmp, default_path)
+
+    def _normalized_package_collections(self):
+        pkg = self.spec.package
+        names = getattr(pkg, "collections", None) or getattr(pkg, "tags", [])
+        return sorted({str(x).strip().lower() for x in names if str(x).strip()})
+
+    def _collection_symlink_paths(self):
+        roots = self.conf.collection_roots
+        if not roots:
+            return []
+
+        rel_module_path = os.path.relpath(self.layout.filename, self.layout.dirname())
+        symlinks = []
+        for collection in self._normalized_package_collections():
+            root = roots.get(collection)
+            if not root:
+                continue
+            symlinks.append(os.path.join(root, rel_module_path))
+        return symlinks
+
+    def update_collection_symlinks(self):
+        """Create/update configured symlinks for package collections."""
+        target = self.layout.filename
+        for symlink_path in self._collection_symlink_paths():
+            parent = os.path.dirname(symlink_path)
+            if not os.path.exists(parent):
+                spack.llnl.util.filesystem.mkdirp(parent)
+
+            if os.path.lexists(symlink_path):
+                if os.path.islink(symlink_path):
+                    if os.readlink(symlink_path) == target:
+                        continue
+                    os.remove(symlink_path)
+                else:
+                    tty.warn(
+                        f"Collection symlink path exists and is not a symlink: {symlink_path}"
+                    )
+                    continue
+
+            os.symlink(target, symlink_path)
+
+    def remove_collection_symlinks(self):
+        """Remove configured collection symlinks for this module, if present."""
+        for symlink_path in self._collection_symlink_paths():
+            try:
+                if os.path.islink(symlink_path):
+                    os.unlink(symlink_path)
+                os.removedirs(os.path.dirname(symlink_path))
+            except OSError:
+                # removedirs throws on first non-empty directory found.
+                pass
 
     def update_module_hiddenness(self, remove=False):
         """Update modulerc file corresponding to module to add or remove
@@ -985,6 +1063,7 @@ class BaseModuleFileWriter:
         if os.path.exists(mod_file):
             try:
                 os.remove(mod_file)  # Remove the module file
+                self.remove_collection_symlinks()  # Remove collection symlinks if any
                 self.remove_module_defaults()  # Remove default targeting module file
                 self.update_module_hiddenness(remove=True)  # Remove hide cmd in modulerc
                 os.removedirs(

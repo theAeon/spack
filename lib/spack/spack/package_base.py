@@ -685,6 +685,9 @@ class PackageBase(WindowsRPath, PackageViewMixin, metaclass=PackageMeta):
     #: Do not include @ here in order not to unnecessarily ping the users.
     maintainers: List[str] = []
 
+    #: Optional high-level package collections/categories used by module generation.
+    collections: List[str] = []
+
     #: Set to ``True`` to indicate the stand-alone test requires a compiler.
     #: It is used to ensure a compiler and build dependencies like ``cmake``
     #: are available to build a custom test code.

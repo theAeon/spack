@@ -113,6 +113,17 @@ def test_license_directive(config, mock_packages, package_name, expected_license
         assert license[0] == pkg_cls.licenses[spack.spec.Spec(license[1])]
 
 
+def test_collection_directive():
+    package = namedtuple("package", ["collections", "tags"])
+    package.collections = ["runtime"]
+    package.tags = ["runtime", "compiler"]
+
+    spack.directives.collection("Chemistry", "runtime", " ", "chemistry")(package)
+
+    assert package.collections == ["chemistry", "runtime"]
+    assert package.tags == ["chemistry", "compiler", "runtime"]
+
+
 def test_duplicate_exact_range_license():
     package = namedtuple("package", ["licenses", "name"])
     package.licenses = {spack.spec.Spec("+foo"): "Apache-2.0"}

@@ -88,6 +88,40 @@ def test_modules_default_symlink(
     assert not os.path.lexists(link_path)
 
 
+@pytest.mark.parametrize("module_type", ["tcl", "lmod"])
+def test_modules_collection_symlink(module_type, mock_packages, mutable_config, tmp_path):
+    collection_root = tmp_path / "categories" / "tag1"
+
+    module_type_settings = {
+        "all": {"autoload": "none"},
+        "collection_roots": {"tag1": str(collection_root)},
+    }
+    if module_type == "lmod":
+        module_type_settings["core_compilers"] = ["clang@3.3"]
+        module_type_settings["hierarchy"] = []
+
+    spack.config.set(
+        "modules",
+        {
+            "prefix_inspections": {},
+            "default": {"enable": [module_type], module_type: module_type_settings},
+        },
+    )
+
+    spec = spack.concretize.concretize_one("mpich@3.0.4")
+    generator_cls = spack.modules.module_types[module_type]
+    generator = generator_cls(spec, "default")
+    generator.write(overwrite=True)
+
+    relpath = os.path.relpath(generator.layout.filename, generator.layout.dirname())
+    link_path = collection_root / relpath
+    assert os.path.islink(link_path)
+    assert readlink(link_path) == generator.layout.filename
+
+    generator.remove()
+    assert not os.path.lexists(link_path)
+
+
 class MockDb:
     def __init__(self, db_ids, spec_hash_to_db):
         self.upstream_dbs = db_ids

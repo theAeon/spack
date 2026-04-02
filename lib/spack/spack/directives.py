@@ -18,6 +18,7 @@ The available directives are:
 
 * ``build_system``
 * ``conflicts``
+* ``collection``
 * ``depends_on``
 * ``extends``
 * ``license``
@@ -62,6 +63,7 @@ __all__ = [
     "version",
     "conditional",
     "conflicts",
+    "collection",
     "depends_on",
     "extends",
     "maintainers",
@@ -851,6 +853,32 @@ def maintainers(*names: str):
         pkg.maintainers = sorted(maintainers)
 
     return _execute_maintainer
+
+
+@directive(dicts=())
+def collection(*names: str):
+    """Declare one or more package collections for module metadata.
+
+    Collection names are stored in ``pkg.collections`` and mirrored in
+    ``pkg.tags`` for compatibility with existing tag-based workflows.
+
+    Args:
+        names: collection names (for example ``"chemistry"``)
+    """
+
+    normalized_names = sorted({name.strip().lower() for name in names if name and name.strip()})
+
+    def _execute_collection(pkg):
+        collections = set(getattr(pkg, "collections", []))
+        collections.update(normalized_names)
+        pkg.collections = sorted(collections)
+
+        # Keep compatibility with existing Spack package tagging semantics.
+        tags = set(getattr(pkg, "tags", []))
+        tags.update(normalized_names)
+        pkg.tags = sorted(tags)
+
+    return _execute_collection
 
 
 def _execute_license(

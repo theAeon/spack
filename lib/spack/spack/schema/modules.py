@@ -55,6 +55,10 @@ common_props = {
     "defaults": array_of_strings,
     "hide_implicits": {"type": "boolean", "default": False},
     "naming_scheme": {"type": "string"},
+    "collection_roots": {
+        "type": "object",
+        "additionalProperties": {"type": "string"},
+    },
     "projections": projections_scheme,
     "all": module_file_configuration,
 }

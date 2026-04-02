@@ -51,11 +51,13 @@ from urllib.request import urlopen
 
 import spack.builder
 import spack.config
+import spack.database
 import spack.fetch_strategy
 import spack.llnl.util.lang
 import spack.patch
 import spack.repo
 import spack.spec
+import spack.store
 import spack.util.crypto
 import spack.util.spack_yaml as syaml
 import spack.variant
@@ -1418,3 +1420,417 @@ def _test_detection_by_executable(pkgs, debug_log, error_cls):
                     )
 
     return errors
+
+
+#: Sanity checks on specs duplicates
+specs_duplicates = AuditClass(
+    group="specs",
+    tag="INST-DUPLICATES", 
+    description="Check for potential duplicate specs",
+    kwargs=("spec_input",),
+)
+
+
+def _normalize_spec_line(original_line, pkg_name, pkg_version, compiler):
+    """
+    Normalize a spec line from spack output to be parseable by Spack.
+    
+    Args:
+        original_line: Original spec line from spack output
+        pkg_name: Package name
+        pkg_version: Package version  
+        compiler: Compiler specification
+        
+    Returns:
+        Normalized spec string that Spack can parse
+    """
+    try:
+        # Start with the basic package@version
+        normalized = f"{pkg_name}@{pkg_version}"
+        
+        # Add compiler in simple format if available
+        if compiler:
+            normalized += f"%{compiler}"
+        
+        # Extract variants (+ and ~ options)
+        variants_match = re.findall(r'[~+][a-zA-Z0-9_-]+', original_line)
+        if variants_match:
+            normalized += ''.join(variants_match)
+        
+        # Extract architecture if present
+        arch_match = re.search(r'arch=([^\s]+)', original_line)
+        if arch_match:
+            normalized += f" arch={arch_match.group(1)}"
+            
+        # Extract build_system if present
+        build_system_match = re.search(r'build_system=([^\s]+)', original_line)
+        if build_system_match:
+            normalized += f" build_system={build_system_match.group(1)}"
+            
+        # Extract build_type if present
+        build_type_match = re.search(r'build_type=([^\s]+)', original_line)
+        if build_type_match:
+            normalized += f" build_type={build_type_match.group(1)}"
+        
+        return normalized
+        
+    except Exception:
+        # If normalization fails, return a minimal spec
+        if compiler:
+            return f"{pkg_name}@{pkg_version}%{compiler}"
+        return f"{pkg_name}@{pkg_version}"
+
+
+@specs_duplicates
+def _check_duplicate_specs(spec_input, error_cls):
+    """
+    Check for packages that are marked for new installation ('-') but
+    already exist with the same compiler. For duplicates, perform deep
+    spec comparison to identify differences.
+    
+    Args:
+        spec_input: String containing spack spec output
+        error_cls: Error class factory
+        
+    Returns:
+        List of errors for potential duplicates with detailed differences
+    """
+    errors = []
+    
+    if not spec_input or not spec_input.strip():
+        return errors
+    
+    # Parse spec output to find packages marked for new installation
+    new_installations = []
+    
+    for line in spec_input.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Skip lines that indicate package reuse [+]
+        if re.match(r'^\s*\[?\+\]?', line):
+            continue
+            
+        # Only process lines that indicate new installations (-)
+        if not re.match(r'^[\s]*\-', line):
+            continue
+            
+        # Remove tree characters and status indicators
+        clean_line = re.sub(r'^[\s\-\+\[\]e]*[\^]*', '', line).strip()
+        
+        if not clean_line:
+            continue
+            
+        # Extract package name and version
+        package_match = re.match(r'^([a-zA-Z0-9\-_]+)@([0-9\.]+[a-zA-Z0-9\.\-_]*)', clean_line)
+        if not package_match:
+            continue
+            
+        package_name = package_match.group(1)
+        package_version = package_match.group(2)
+        
+        # Extract compiler (everything after %..., stop before variants/spaces)
+        compiler = None
+        compiler_match = re.search(r'%([^=\s]+)=([^@\s]+@[^\s+~]+)', clean_line)
+        if not compiler_match:
+            # Try simpler pattern for single compiler (stop at +, ~, or space)
+            compiler_match = re.search(r'%([^@\s]+@[^\s+~]+)', clean_line)
+            if compiler_match:
+                compiler = compiler_match.group(1)
+        else:
+            # Multiple compilers specified (e.g., %c,cxx=oneapi@2022.1.2)
+            compiler = compiler_match.group(2)
+        
+        new_installations.append((package_name, package_version, compiler, clean_line))
+    
+    if not new_installations:
+        return errors
+    
+    # Check database for existing installations
+    try:
+        db = spack.store.STORE.db
+        
+        for pkg_name, pkg_version, compiler, original_line in new_installations:
+            try:
+                # Build spec string for parsing
+                if compiler:
+                    normalized_line = _normalize_spec_line(
+                        original_line, pkg_name, pkg_version, compiler
+                    )
+                    requested_spec = spack.spec.Spec(normalized_line)
+                    if not requested_spec.concrete:
+                        requested_spec = spack.spec.Spec(
+                            f"{pkg_name}@{pkg_version}%{compiler}"
+                        )
+                    query_spec_str = f"{pkg_name}@{pkg_version}%{compiler}"
+                else:
+                    requested_spec = spack.spec.Spec(f"{pkg_name}@{pkg_version}")
+                    query_spec_str = f"{pkg_name}@{pkg_version}"
+                
+                base_query_spec = spack.spec.Spec(query_spec_str)
+                
+                # Find existing specs matching name, version (and compiler if available)
+                existing_specs = db.query(base_query_spec, installed=True)
+                
+                if existing_specs:
+                    # Perform detailed comparison for each existing spec
+                    differences_found = []
+                    truly_identical = []
+                    
+                    for existing_spec in existing_specs:
+                        differences = _compare_specs_deeply(requested_spec, existing_spec)
+                        if differences:
+                            differences_found.append((existing_spec, differences))
+                        else:
+                            truly_identical.append(existing_spec)
+                    
+                    compiler_str = f" with compiler {compiler}" if compiler else ""
+                    
+                    if truly_identical:
+                        # Found truly identical specs - this is a real duplicate
+                        summary = (
+                            f"Package {pkg_name}@{pkg_version}{compiler_str} "
+                            f"is marked for installation but identical installation(s) already exist"
+                        )
+                        details = [
+                            f"Requested spec: {requested_spec}",
+                            f"Found {len(truly_identical)} identical installation(s):",
+                        ]
+                        for spec in truly_identical:
+                            details.append(f"  - {spec} (hash: {spec.dag_hash()[:7]})")
+                        
+                        errors.append(error_cls(summary=summary, details=details))
+                    
+                    elif differences_found:
+                        # Found similar specs but with differences - report the differences
+                        summary = (
+                            f"Package {pkg_name}@{pkg_version}{compiler_str} "
+                            f"is similar to existing installation(s) but has differences"
+                        )
+                        details = [
+                            f"Requested spec: {requested_spec}",
+                            f"Found {len(differences_found)} similar installation(s) with differences:",
+                        ]
+                        
+                        for existing_spec, differences in differences_found:
+                            details.append("")
+                            details.append(f"  Existing: {existing_spec} (hash: {existing_spec.dag_hash()[:7]})")
+                            details.append("  Differences:")
+                            for diff in differences:
+                                details.append(f"    - {diff}")
+                                
+                        # This is informational - not necessarily an error
+                        # But useful for understanding why specs are different
+                        errors.append(error_cls(summary=summary, details=details))
+                    
+            except Exception as e:
+                # If we can't parse or query a specific package, continue with others
+                summary = f"Error checking {pkg_name}@{pkg_version}: {str(e)}"
+                details = [f"Spec line: {original_line}"]
+                errors.append(error_cls(summary=summary, details=details))
+                
+    except Exception as e:
+        summary = "Error accessing Spack database"
+        details = [f"Database error: {str(e)}"]
+        errors.append(error_cls(summary=summary, details=details))
+    
+    return errors
+
+
+def _compare_specs_deeply(requested_spec, existing_spec):
+    """
+    Perform deep comparison between requested and existing specs.
+    
+    Args:
+        requested_spec: The spec being requested for installation
+        existing_spec: An existing installed spec
+        
+    Returns:
+        List of differences found, empty list if specs are identical
+    """
+    differences = []
+    
+    try:
+        # Compare basic attributes
+        if requested_spec.name != existing_spec.name:
+            differences.append(f"Package name: {requested_spec.name} vs {existing_spec.name}")
+            
+        if str(requested_spec.version) != str(existing_spec.version):
+            differences.append(f"Version: {requested_spec.version} vs {existing_spec.version}")
+            
+        if str(requested_spec.compiler) != str(existing_spec.compiler):
+            differences.append(f"Compiler: {requested_spec.compiler} vs {existing_spec.compiler}")
+        
+        # Compare variants - handle both concrete and abstract specs
+        try:
+            req_variants = getattr(requested_spec, 'variants', {})
+            exist_variants = getattr(existing_spec, 'variants', {})
+            
+            all_variant_names = set(req_variants.keys()) | set(exist_variants.keys())
+            for variant_name in sorted(all_variant_names):
+                req_val = req_variants.get(variant_name)
+                exist_val = exist_variants.get(variant_name)
+                
+                if req_val != exist_val:
+                    req_str = _format_variant_value(variant_name, req_val)
+                    exist_str = _format_variant_value(variant_name, exist_val)
+                    differences.append(f"Variant {variant_name}: {req_str} vs {exist_str}")
+        except Exception as e:
+            differences.append(f"Error comparing variants: {str(e)}")
+        
+        # Compare architecture
+        try:
+            if hasattr(requested_spec, 'architecture') and hasattr(existing_spec, 'architecture'):
+                if str(requested_spec.architecture) != str(existing_spec.architecture):
+                    differences.append(f"Architecture: {requested_spec.architecture} vs {existing_spec.architecture}")
+        except Exception as e:
+            differences.append(f"Error comparing architecture: {str(e)}")
+        
+        # Compare dependencies only if both specs are concrete enough
+        try:
+            if (hasattr(requested_spec, 'dependencies') and 
+                hasattr(existing_spec, 'dependencies') and
+                existing_spec.concrete):
+                dep_differences = _compare_dependencies(requested_spec, existing_spec)
+                differences.extend(dep_differences)
+        except Exception as e:
+            differences.append(f"Error comparing dependencies: {str(e)}")
+        
+        # Compare compiler flags if available
+        try:
+            if (hasattr(requested_spec, 'compiler_flags') and 
+                hasattr(existing_spec, 'compiler_flags')):
+                req_flags = getattr(requested_spec, 'compiler_flags', {})
+                exist_flags = getattr(existing_spec, 'compiler_flags', {})
+                
+                all_flag_types = set(req_flags.keys()) | set(exist_flags.keys())
+                for flag_type in sorted(all_flag_types):
+                    req_flag_vals = req_flags.get(flag_type, [])
+                    exist_flag_vals = exist_flags.get(flag_type, [])
+                    
+                    if set(req_flag_vals) != set(exist_flag_vals):
+                        differences.append(
+                            f"Compiler flags {flag_type}: {req_flag_vals} vs {exist_flag_vals}"
+                        )
+        except Exception as e:
+            differences.append(f"Error comparing compiler flags: {str(e)}")
+                    
+    except Exception as e:
+        differences.append(f"Error during comparison: {str(e)}")
+    
+    return differences
+
+
+def _format_variant_value(variant_name, variant_value):
+    """Format a variant value for display."""
+    if variant_value is None:
+        return f"(no {variant_name})"
+    try:
+        if hasattr(variant_value, 'value'):
+            return f"+{variant_name}" if variant_value.value else f"~{variant_name}"
+        else:
+            return f"+{variant_name}" if variant_value else f"~{variant_name}"
+    except Exception:
+        return str(variant_value)
+
+
+def _compare_dependencies(requested_spec, existing_spec, max_depth=3, current_depth=0):
+    """
+    Compare dependencies between two specs recursively.
+    
+    Args:
+        requested_spec: The requested spec
+        existing_spec: The existing spec
+        max_depth: Maximum depth to recurse into dependencies
+        current_depth: Current recursion depth
+        
+    Returns:
+        List of dependency differences
+    """
+    differences = []
+    
+    if current_depth >= max_depth:
+        return differences
+        
+    try:
+        # Only compare dependencies if the existing spec is concrete
+        if not existing_spec.concrete:
+            return differences
+            
+        # Get direct dependencies - handle cases where spec might not have dependencies
+        try:
+            req_deps = {dep.name: dep for dep in requested_spec.dependencies()}
+        except Exception:
+            req_deps = {}
+            
+        try:
+            exist_deps = {dep.name: dep for dep in existing_spec.dependencies()}
+        except Exception:
+            exist_deps = {}
+        
+        # Find dependencies that exist in one spec but not the other
+        only_in_requested = set(req_deps.keys()) - set(exist_deps.keys())
+        only_in_existing = set(exist_deps.keys()) - set(req_deps.keys())
+        common_deps = set(req_deps.keys()) & set(exist_deps.keys())
+        
+        if only_in_requested:
+            for dep_name in sorted(only_in_requested):
+                differences.append(
+                    f"Dependency {dep_name}: required in new spec but not in existing"
+                )
+                
+        if only_in_existing:
+            for dep_name in sorted(only_in_existing):
+                differences.append(
+                    f"Dependency {dep_name}: exists in current spec but not required in new"
+                )
+        
+        # Compare common dependencies
+        for dep_name in sorted(common_deps):
+            try:
+                req_dep = req_deps[dep_name]
+                exist_dep = exist_deps[dep_name]
+                
+                # Compare dependency versions
+                if str(req_dep.version) != str(exist_dep.version):
+                    differences.append(
+                        f"Dependency {dep_name} version: {req_dep.version} vs {exist_dep.version}"
+                    )
+                
+                # Compare dependency variants (only major ones to avoid noise)
+                try:
+                    req_variants = getattr(req_dep, 'variants', {})
+                    exist_variants = getattr(exist_dep, 'variants', {})
+                    
+                    important_variants = set(req_variants.keys()) | set(exist_variants.keys())
+                    for variant_name in sorted(important_variants):
+                        req_val = req_variants.get(variant_name)
+                        exist_val = exist_variants.get(variant_name)
+                        
+                        if req_val != exist_val:
+                            req_str = _format_variant_value(variant_name, req_val)
+                            exist_str = _format_variant_value(variant_name, exist_val)
+                            differences.append(
+                                f"Dependency {dep_name} variant {variant_name}: {req_str} vs {exist_str}"
+                            )
+                except Exception:
+                    # Skip variant comparison if it fails
+                    pass
+                
+                # Recurse into subdependencies if not too deep and existing dep is concrete
+                if current_depth < max_depth - 1 and exist_dep.concrete:
+                    subdep_differences = _compare_dependencies(
+                        req_dep, exist_dep, max_depth, current_depth + 1
+                    )
+                    # Prefix subdependency differences to show the path
+                    for subdiff in subdep_differences:
+                        differences.append(f"  {dep_name} -> {subdiff}")
+                        
+            except Exception as e:
+                differences.append(f"Error comparing dependency {dep_name}: {str(e)}")
+                    
+    except Exception as e:
+        differences.append(f"Error comparing dependencies: {str(e)}")
+    
+    return differences

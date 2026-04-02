@@ -132,6 +132,8 @@ class TestLmod:
         assert "-- -*- lua -*-" in content
         assert "whatis([[Name : mpich]])" in content
         assert "whatis([[Version : 3.0.4]])" in content
+        assert "whatis([[Collection : tag1]])" in content
+        assert "whatis([[Collection : tag2]])" in content
         assert 'family("mpi")' in content
 
     def test_autoload_direct(self, modulefile_content, module_configuration):

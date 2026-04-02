@@ -11,6 +11,9 @@ whatis([[Version : {{ spec.version }}]])
 whatis([[Target : {{ spec.target }}]])
 whatis([[Short description : {{ short_description }}]])
 {% endif %}
+{% for collection in collections %}
+whatis([[Collection : {{ collection }}]])
+{% endfor %}
 {% if configure_options %}
 whatis([[Configure options : {{ configure_options }}]])
 {% endif %}

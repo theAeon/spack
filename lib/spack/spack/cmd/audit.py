@@ -40,6 +40,14 @@ def setup_parser(subparser: argparse.ArgumentParser) -> None:
     # Audit package recipes
     pkg_parser = sp.add_parser("packages", help="audit package recipes")
 
+    # Audit specs for duplicates
+    install_parser = sp.add_parser("specs", help="check for potential duplicate specs")
+    install_parser.add_argument(
+        "--spec-input",
+        metavar="SPEC_INPUT",
+        help="spec output to check (if not provided, reads from stdin)",
+    )
+
     for group in [pkg_parser, https_parser, external_parser]:
         group.add_argument(
             "name",
@@ -86,6 +94,22 @@ def externals(parser, args):
     reports = spack.audit.run_group(args.subcommand, pkgs=pkgs, debug_log=tty.debug)
     _process_reports(reports)
 
+def specs(parser, args):
+    import sys
+    
+    # Get spec input from argument or stdin
+    if args.spec_input:
+        spec_input = args.spec_input
+    else:
+        # Read from stdin
+        spec_input = sys.stdin.read()
+    
+    if not spec_input.strip():
+        tty.die("No spec input provided. Please provide spec output via --spec-input or stdin.")
+    
+    reports = spack.audit.run_group(args.subcommand, spec_input=spec_input)
+    _process_reports(reports)
+
 
 def list(parser, args):
     for subcommand, check_tags in spack.audit.GROUPS.items():
@@ -104,6 +128,7 @@ def audit(parser, args):
     subcommands = {
         "configs": configs,
         "externals": externals,
+        "specs": specs,
         "packages": packages,
         "packages-https": packages_https,
         "list": list,

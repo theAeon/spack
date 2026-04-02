@@ -39,6 +39,7 @@ from spack.deptypes import ALL_TYPES as all_deptypes
 from spack.directives import (
     build_system,
     can_splice,
+    collection,
     conditional,
     conflicts,
     depends_on,
@@ -310,6 +311,7 @@ api: Dict[str, Tuple[str, ...]] = {
         "check_outputs",
         "conditional",
         "conflicts",
+        "collection",
         "copy_tree",
         "copy",
         "default_args",
@@ -479,6 +481,7 @@ __all__ = [
     "check_outputs",
     "conditional",
     "conflicts",
+    "collection",
     "copy_tree",
     "copy",
     "default_args",

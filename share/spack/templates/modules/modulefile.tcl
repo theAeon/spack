@@ -13,6 +13,9 @@
 {% if short_description %}
 module-whatis {{ '{' }}{{ short_description }}{{ '}' }}
 {% endif %}
+{% for collection in collections %}
+module-whatis {{ '{' }}Collection: {{ collection }}{{ '}' }}
+{% endfor %}
 
 proc ModulesHelp { } {
     puts stderr {{ '{' }}Name   : {{ spec.name }}{{ '}' }}

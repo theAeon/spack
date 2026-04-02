@@ -34,6 +34,8 @@ class TestTcl:
         content = modulefile_content(mpich_spec_string)
 
         assert "module-whatis {mpich @3.0.4}" in content
+        assert "module-whatis {Collection: tag1}" in content
+        assert "module-whatis {Collection: tag2}" in content
 
     def test_autoload_direct(self, modulefile_content, module_configuration):
         """Tests the automatic loading of direct dependencies."""
