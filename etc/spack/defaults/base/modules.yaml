@@ -39,9 +39,9 @@ modules:
     # Where to install modules
     roots:
      tcl:    $spack/share/spack/modules
-     lmod:   $spack/share/spack/lmod
+     lmod:   /home/$user/.spack/modules
     # What type of modules to use ("tcl" and/or "lmod")
-    enable: []
+    enable: ["lmod"]
 
     tcl:
       all:
@@ -51,6 +51,14 @@ modules:
     lmod:
       all:
         autoload: all
+      # Optional extra roots keyed by package collection/tag. If a package has
+      # a matching collection (for example: collection("chemistry")), Spack
+      # writes the regular module under 'roots:lmod' and also creates a symlink
+      # under the matching collection root.
+      collection_roots:
+        chemistry: /home/$user/.spack/modules/Collection/Chemistry
+        MultiPhysics: /home/$user/.spack/Collection/Multiphysics
+        Bioinformatics: /home/$user/.spack/Collection/Bioinformatics
       hierarchy: []
       core_compilers:
         - gcc@=8.5.0
