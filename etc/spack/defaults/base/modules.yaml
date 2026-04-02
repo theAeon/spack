@@ -50,6 +50,10 @@ modules:
     # Default configurations if lmod is enabled
     lmod:
       all:
-        autoload: direct
-      hierarchy:
-        - mpi
+        autoload: all
+      hierarchy: []
+      core_compilers:
+        - gcc@=8.5.0
+      projections:
+        +cuda: "{name}/{version}-cuda-{^cuda.version}"
+        all: '{name}/{version}'
